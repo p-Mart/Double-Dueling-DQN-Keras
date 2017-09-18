@@ -9,17 +9,14 @@ import matplotlib.pyplot as plt
 from gridworld import gameEnv
 
 from keras.models import Model
-from keras.layers import Input, Dense
+from keras.layers import Input, Dense, Lambda
 from keras.layers.convolutional import Conv2D
 from keras import backend as K
 from keras.engine.topology import Layer
-from keras.layers.merge import _Merge
+from keras.layers.merge import _Merge, Multiply
 
 env_size = 5
 env = gameEnv(partial=False, size=env_size)
-
-print env.actions
-print env.observation
 
 class Experience():
 
@@ -47,28 +44,39 @@ class QLayer(_Merge):
         output = inputs[0] + (inputs[1] - K.mean(inputs[1], axis=1, keepdims=True))
         return output
 
-
-
 class QNetwork():
 
     def __init__(self, h_size):
         self.inputs = Input(shape=(84,84,3))
+        self.actions = Input(shape=(None,1), dtype='int32')
+        self.actions_onehot = Lambda(K.one_hot, 
+                                                            arguments={'num_classes':env.actions}, 
+                                                            output_shape=(None, env.actions)
+                                                          )(self.actions)
 
         x = Conv2D(filters=32, kernel_size=[8,8], strides=[4,4], input_shape=(-1, 84, 84, 3))(self.inputs)
         x = Conv2D(filters=64, kernel_size=[4,4],strides=[2,2])(x)
         x = Conv2D(filters=64, kernel_size=[3,3],strides=[1,1])(x)
         x = Conv2D(filters=h_size, kernel_size=[7,7],strides=[1,1])(x)
 
-        #Split output of conv stack into value and advantage layers
-        value = Dense(h_size // 2, activation="linear")(x)
-        advantage = Dense(h_size // 2, activation="linear")(x)
+        #Splice outputs of last conv layer using lambda layer
+        x_value = Lambda(lambda x: x[:,:,:h_size//2], output_shape=(h_size//2,))(x)
+        x_advantage = Lambda(lambda x: x[:,:,h_size//2:], output_shape=(h_size//2,))(x)
+
+        #Process spliced data stream into value and advantage function
+        value = Dense(env.actions, input_shape=(h_size // 2, ), activation="linear")(x_value)
+        advantage = Dense(env.actions, input_shape=(h_size // 2, ), activation="linear")(x_advantage)
 
         #Recombine value and advantage layers into Q layer
-        self.q = QLayer()([value, advantage])
+        q = QLayer()([value, advantage])
+
+        self.q_out = Multiply()([q, self.actions_onehot])
 
         #need to figure out how to represent actions within training
-        self.model = Model(inputs=[self.inputs], outputs=self.q)
+        self.model = Model(inputs=[self.inputs, self.actions], outputs=self.q_out)
         self.model.compile(optimizer="Adam", loss="mean_squared_error")
+
+        self.model.summary()
 
 
 def resizeFrames(states):
@@ -104,6 +112,7 @@ experience = Experience(buffer_size=50000)
 ## the weights of the actor network                                   ##
 #target_network.set_weights(actor_network.get_weights())
 
+'''
 for i in xrange(num_episodes):
     episode_exp = Experience(buffer_size=50000)
     s = env.reset()
@@ -131,4 +140,4 @@ for i in xrange(num_episodes):
                 eps -= step_drop
 
             if total_steps % update_freq == 0:
-                
+'''
