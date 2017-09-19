@@ -29,13 +29,14 @@ class Experience():
 
         if(len(exp)+self.buffer_size >= len(self.replay_buffer)):
             del self.replay_buffer[:(len(exp)+len(self.replay_buffer) - self.buffer_size)]
-        
+
         self.replay_buffer.extend(exp)
 
         return self.replay_buffer
 
     def sample(self, sample_size):
-        return np.reshape(np.array(random.sample(self.replay_buffer, size)), (sample_size, env_size))
+        #return np.reshape(np.array(random.sample(self.replay_buffer, sample_size)), [sample_size, env_size])
+        return random.sample(self.replay_buffer, sample_size)
 
 class QLayer(_Merge):
     '''Q Layer that merges an advantage and value layer'''
@@ -48,35 +49,33 @@ class QNetwork():
 
     def __init__(self, h_size):
         self.inputs = Input(shape=(84,84,3))
-        self.actions = Input(shape=(None,1), dtype='int32')
-        self.actions_onehot = Lambda(K.one_hot, 
-                                                            arguments={'num_classes':env.actions}, 
-                                                            output_shape=(None, env.actions)
-                                                          )(self.actions)
+        self.actions = Input(shape=(1,), dtype='int32')
+        self.actions_onehot = Lambda(K.one_hot, arguments={'num_classes':env.actions}, output_shape=(None, env.actions))(self.actions)
 
-        x = Conv2D(filters=32, kernel_size=[8,8], strides=[4,4], input_shape=(-1, 84, 84, 3))(self.inputs)
+        x = Conv2D(filters=32, kernel_size=[8,8], strides=[4,4], input_shape=(84, 84, 3))(self.inputs)
         x = Conv2D(filters=64, kernel_size=[4,4],strides=[2,2])(x)
         x = Conv2D(filters=64, kernel_size=[3,3],strides=[1,1])(x)
         x = Conv2D(filters=h_size, kernel_size=[7,7],strides=[1,1])(x)
 
         #Splice outputs of last conv layer using lambda layer
-        x_value = Lambda(lambda x: x[:,:,:h_size//2], output_shape=(h_size//2,))(x)
-        x_advantage = Lambda(lambda x: x[:,:,h_size//2:], output_shape=(h_size//2,))(x)
+        x_value = Lambda(lambda x: x[:,:,:,:h_size//2])(x)
+        x_advantage = Lambda(lambda x: x[:,:,:,h_size//2:])(x)
 
         #Process spliced data stream into value and advantage function
-        value = Dense(env.actions, input_shape=(h_size // 2, ), activation="linear")(x_value)
-        advantage = Dense(env.actions, input_shape=(h_size // 2, ), activation="linear")(x_advantage)
+        value = Dense(env.actions, activation="linear")(x_value)
+        advantage = Dense(env.actions, activation="linear")(x_advantage)
 
         #Recombine value and advantage layers into Q layer
         q = QLayer()([value, advantage])
 
         self.q_out = Multiply()([q, self.actions_onehot])
-
+        self.q_out = Lambda(K.cumsum)(self.q_out)
         #need to figure out how to represent actions within training
-        self.model = Model(inputs=[self.inputs, self.actions], outputs=self.q_out)
+        self.model = Model(inputs=[self.inputs, self.actions], outputs=[q, self.q_out])
         self.model.compile(optimizer="Adam", loss="mean_squared_error")
 
         self.model.summary()
+
 
 
 def resizeFrames(states):
@@ -112,11 +111,11 @@ experience = Experience(buffer_size=50000)
 ## the weights of the actor network                                   ##
 #target_network.set_weights(actor_network.get_weights())
 
-'''
+
 for i in xrange(num_episodes):
     episode_exp = Experience(buffer_size=50000)
     s = env.reset()
-    s = resizeFrames(s)
+    #s = resizeFrames(s)
     done = False
     total_reward = 0
     j = 0
@@ -124,14 +123,14 @@ for i in xrange(num_episodes):
     while j < max_episode_length:
         j += 1
 
-        if np.random.rand(1) < e or total_steps < pre_train_steps:
+        if np.random.rand(1) < eps or total_steps < pre_train_steps:
             a = np.random.randint(0, 4)
         else:
-            prediction = actor_network.predict(s)
-            a = np.argmax(prediction)
+            prediction = actor_network.model.predict(s, [0])
+            a = np.argmax(prediction[0])
 
         s1, r, done = env.step(a)
-        s1 = resizeFrames(s1)
+        #s1 = resizeFrames(s1)
         total_steps += 1
         episode_exp.storeExperience(np.reshape(np.array([s,a,r,s1,done]), [1, 5]))
 
@@ -140,4 +139,42 @@ for i in xrange(num_episodes):
                 eps -= step_drop
 
             if total_steps % update_freq == 0:
-'''
+                train_batch = experience.sample(batch_size)
+                
+                #Have to do this because couldn't easily splice array
+                #out of experience buffer, e.g.,
+                #train_input = train_batch[:, 3]
+                #when train_batch was a numpy array
+                train_input = np.ndarray((batch_size, 84, 84, 3))
+                for i in range(batch_size):
+                    train_input[i] = train_batch[i][3]
+
+                
+
+
+
+                q1 = actor_network.model.predict([train_input, np.ndarray((32, 1))])
+                q1 = np.argmax(q1)
+
+                q2 = target_network.model.predict([train_input, np.ndarray((32, 1))])
+
+                end_multiplier = -(train_batch[:, 4] - 1)
+                double_q = q2[:, q1]
+                target_q = train_batch[:, 2] + (gamma*double_q*end_multiplier)
+
+                q = actor_network.model.predict(train_batch[:, 0])
+                q_of_actions = q[:, train_batch[:, 1]]
+
+                actor_network.fit(q_of_actions, target_q)
+                target_network.set_weights(actor_network.get_weights())
+
+
+        total_reward += r
+        s = s1
+
+        if done == True:
+            break
+
+    experience.storeExperience(episode_exp.replay_buffer)
+    j_list.append(j)
+    r_list.append(total_reward)
