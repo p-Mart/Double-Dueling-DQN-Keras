@@ -69,7 +69,7 @@ class QNetwork():
         q = QLayer()([value, advantage])
 
         self.q_out = Multiply()([q, self.actions_onehot])
-        self.q_out = Lambda(K.cumsum)(self.q_out)
+        self.q_out = Lambda(lambda x: K.cumsum(x, axis=3), output_shape=(1,))(self.q_out)
         #need to figure out how to represent actions within training
         self.model = Model(inputs=[self.inputs, self.actions], outputs=[q, self.q_out])
         self.model.compile(optimizer="Adam", loss="mean_squared_error")
@@ -126,7 +126,7 @@ for i in xrange(num_episodes):
         if np.random.rand(1) < eps or total_steps < pre_train_steps:
             a = np.random.randint(0, 4)
         else:
-            prediction = actor_network.model.predict(s, [0])
+            prediction = actor_network.model.predict([s.reshape((1,84,84,3)), np.zeros((32, 1))])
             a = np.argmax(prediction[0])
 
         s1, r, done = env.step(a)
@@ -145,28 +145,36 @@ for i in xrange(num_episodes):
                 #out of experience buffer, e.g.,
                 #train_input = train_batch[:, 3]
                 #when train_batch was a numpy array
-                train_input = np.ndarray((batch_size, 84, 84, 3))
+                this_state = np.ndarray((batch_size, 84, 84, 3))
+                actions = np.ndarray((batch_size, 1))
+                rewards = np.ndarray((batch_size, 1))
+                next_state = np.ndarray((batch_size, 84, 84, 3))
+                dones = np.ndarray((batch_size, 1))
                 for i in range(batch_size):
-                    train_input[i] = train_batch[i][3]
+                    this_state[i] = train_batch[i][0]
+                    actions[i] = train_batch[i][1]
+                    rewards[i] = train_batch[i][2]
+                    next_state[i] = train_batch[i][3]
+                    dones[i] = train_batch[i][4]
+            
+                q1 = actor_network.model.predict([next_state, np.zeros((32, 1))])
+                q1 = np.argmax(q1[0], axis=3)
 
-                
+                q2 = target_network.model.predict([next_state, np.zeros((32, 1))])
+                q2 = q2[0].reshape((batch_size, env.actions))
 
+                end_multiplier = -(dones - 1)
 
+                double_q = q2[range(32), q1.reshape((32))].reshape((32, 1))
 
-                q1 = actor_network.model.predict([train_input, np.ndarray((32, 1))])
-                q1 = np.argmax(q1)
+                target_q = rewards + (gamma*double_q*end_multiplier)
 
-                q2 = target_network.model.predict([train_input, np.ndarray((32, 1))])
-
-                end_multiplier = -(train_batch[:, 4] - 1)
-                double_q = q2[:, q1]
-                target_q = train_batch[:, 2] + (gamma*double_q*end_multiplier)
-
-                q = actor_network.model.predict(train_batch[:, 0])
-                q_of_actions = q[:, train_batch[:, 1]]
-
-                actor_network.fit(q_of_actions, target_q)
-                target_network.set_weights(actor_network.get_weights())
+                print "Target Q Shape: ", target_q.shape
+                q = actor_network.model.predict([this_state, actions])
+                #q_of_actions = q[:, train_batch[:, 1]]
+                print target_q.shape
+                actor_network.model.fit([this_state, actions], [np.zeros((32, 1, 1, 4)) ,target_q])
+                target_network.model.set_weights(actor_network.model.get_weights())
 
 
         total_reward += r
